@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 
 param(
 	[int]$port=15608
@@ -61,6 +61,11 @@ public class User
 	{
 		this.position.set(x, y);
 	}
+	public void Move(Int16 x, Int16 y)
+	{
+		this.position.x += x;
+		this.position.y += y;
+	}
 	public String toString()
 	{
 		return "Player (" + this.id + ")\n  " + this.name + "\n  " + this.position.toString();
@@ -105,36 +110,126 @@ $listener_script =
 	param(
 		$port
 		)
-
+	
+	
+	
+	
+	
+	
+	
+	
 	function StartMessageReceiver ($user_id)
 	{
 		[console]::writeline("!!!!!!!!!!!!!!!!!!! Starting Message Receiver for $user_id")
+		
 		$message_receive_loop =
 		{
-			$client = $clients[$user_id]
-			$stream = $client.GetStream()
-			$buff_size = $client.ReceiveBufferSize
 			
+			$client = $clients[$user_id]
+			$buff_size = $client.ReceiveBufferSize
+			$stream = $client.GetStream()
+			
+			function ProcessMessage($type)
+			{
+				#while (!$server_stream.DataAvailable) {}
+				[console]::writeline("Test1")
+				#try
+				#{
+					switch($type)
+					{
+						0x01 { #update position
+							[console]::writeline("Reading Position...")
+							$position_bytes = New-Object byte[] 4
+							$count = $stream.Read($position_bytes, 0, 4)
+							[console]::writeline("x bytes: {0}" -f $position_bytes[0..1])
+							[console]::writeline("y bytes: {0}" -f $position_bytes[2..3])
+							$x = [BitConverter]::ToInt16($position_bytes[0..1], 0)
+							[console]::writeline("x: $x")
+							$y = [BitConverter]::ToInt16($position_bytes, 2)
+							[console]::writeline("y: $y")
+							
+							$users[$user_id].SetPosition($x, $y)
+						}
+						0x02 { #action
+							[console]::writeline("Reading Action...")
+							$message_size_bytes = New-Object byte[] 2
+							$count = $stream.Read($message_size_bytes, 0, 2)
+							$message_size = [BitConverter]::ToInt16($message_size_bytes, 0)
+							[console]::writeline("Message Size: $message_size")
+							
+							$user_size = 5
+							$true_message_size = $message_size * $user_size
+							
+							$message_bytes = New-Object byte[] $true_message_size
+							$count = $stream.Read($message_bytes, 0, $true_message_size)
+							[console]::writeline("Message: ($message_bytes)")
+		
+						}
+						0xff { #disconnect
+							[console]::writeline("Received Disconnect:")
+							$message_size_bytes = New-Object byte[] 2
+							$count = $stream.Read($message_size_bytes, 0, 2)
+							$message_size = [BitConverter]::ToInt16($message_size_bytes, 0)
+							
+							$message_bytes = New-Object byte[] $message_size
+							$count = $stream.Read($message_bytes, 0, $message_size)
+							$message = [System.Text.Encoding]::ASCII.GetString($message_bytes)
+							[console]::writeline("$message")
+							return $false
+						}
+						default {
+							[console]::writeline("Unknown message type: $type")
+							$byte_stream = New-Object byte[] $buff_size
+							$count = $stream.Read($byte_stream, 0, $buff_size)
+							#if count = 0
+							write-host "bytes: $byte_stream"
+							return $false
+							
+						}
+					}
+					
+					
+					
+					#$client_message_queue.Enqueue($message) #user_id, message
 
-			While ($server_state['active']) {
-				[byte[]]$bytes = New-Object byte[] 200KB
+				#} catch [Exception] {
+				#	[console]::writeline("Connection Lost (Processing type $type): `n{0}" -f $_.Exception.Message)
+				#	break
+				#}
+				return $true
 				
+			}
+			
+			while ($server_state['active'])
+			{
 				if ($client.Connected)
 				{
 					if ($stream.DataAvailable)
 					{
-						[console]::writeline("!!! Data Available")
-						$return = $stream.Read($bytes, 0, $buff_size)
-						
-						If ($return -gt 0)
+						$continue_reading = $false
+						#try
+						#{
+							[console]::writeline("!!! Data Available")
+							$type = New-Object byte[] 1
+							$count = $server_stream.Read($type, 0, 1) # Blocking
+							
+							$continue_reading = ProcessMessage $type[0]
+						#}
+						#catch [Exception]
+						#{
+						#	[console]::writeline("Connection Lost (unable to get type): `n{0}" -f $_.Exception.Message)
+						#}
+
+						if (!$continue_reading)
 						{
-							$message = [System.Text.Encoding]::ASCII.GetString($bytes[0..($return - 1)])
-							$client_message_queue.Enqueue($message) #user_id, message
-						} Else {       
 							$remove_client_queue.Enqueue($user_id)
-							[console]::writeline("!!! Read Timeout? Thread {0} added to remove queue" -f $user_id)
-							Break
+							break
 						}
+						
+						#### DEBUG ################################
+						$remove_client_queue.Enqueue($user_id)
+						break
+						
 					}
 				}
 				else 
@@ -320,6 +415,7 @@ function BroadcastMessage ($message)
 	
 	foreach ($user_id in $clients.keys)
 	{
+		$users[$user_id].Move(1, 1)
 		$client = $clients[$user_id]
 
 		if (-not $client.connected)
@@ -334,11 +430,9 @@ function BroadcastMessage ($message)
 		#$broadcast_bytes = ([text.encoding]::ASCII).GetBytes($message)
 		
 		#try{
-			[console]::writeline("count: {0}" -f $users.count)
 			[int16]$size = [int16]$users.count
-			[console]::writeline("count: {0}" -f $size)
-			$true_size = 3 + ($users.count) * 5
-			[console]::writeline("count: {0}" -f $true_size)
+			$user_size = 5
+			$true_size = 3 + ($users.count) * $user_size
 			$byte_size = [BitConverter]::GetBytes($size)
 			$bytes = new-object byte[] $true_size
 			$bytes[0] = 0x01
