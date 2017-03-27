@@ -10,12 +10,6 @@ param(
 	[string]$username="u1"
 )
 
-[system.net.sockets.tcpclient] $global:client = $null
-[system.net.sockets.NetworkStream] $global:server_stream = $null
-$global:server_state = [hashtable]::Synchronized(@{'active'=$true})
-$global:users = [hashtable]::Synchronized(@{})
-
-
 $class_definition = @"
 using System;
 
@@ -60,6 +54,11 @@ public class User
 	{
 		this.position.set(x, y);
 	}
+	public void Move(Int16 x, Int16 y)
+	{
+		this.position.x += x;
+		this.position.y += y;
+	}
 	public String toString()
 	{
 		return "Player (" + this.id + ")\n  " + this.name + "\n  " + this.position.toString();
@@ -70,10 +69,27 @@ Add-Type -TypeDefinition $class_definition -Language CSharp
 Remove-Variable class_definition
 
 
+
+[system.net.sockets.tcpclient] $global:client = $null
+[system.net.sockets.NetworkStream] $global:server_stream = $null
+$global:server_state = [hashtable]::Synchronized(@{'active'=$true})
+$global:users = [hashtable]::Synchronized(@{})
+$message_queue = [System.Collections.Queue]::Synchronized((New-Object System.collections.queue))
+$global:user = new-object User()
+
+
+
+
 $iss = [system.management.automation.runspaces.initialsessionstate]::CreateDefault()
 $iss.ImportPSModule("PSThreading")
 $iss.Variables.Add(
     (New-Object System.Management.Automation.Runspaces.SessionStateVariableEntry('server_state', $server_state, $null))
+)
+$iss.Variables.Add(
+    (New-Object System.Management.Automation.Runspaces.SessionStateVariableEntry('message_queue', $message_queue, $null))
+)
+$iss.Variables.Add(
+    (New-Object System.Management.Automation.Runspaces.SessionStateVariableEntry('users', $users, $null))
 )
 $rp = [runspacefactory]::CreateRunspacePool($iss)
 $rp.Open()
@@ -173,18 +189,15 @@ function StartMessageReceiver ()
 
 					}
 					0xff { #disconnect
-						$byte_stream = New-Object byte[] 2
-						$count = $server_stream.Read($byte_stream, 0, 2)
-						#if count = 0
-						write-host "BS: $byte_stream"
-						$x = [BitConverter]::ToInt16($byte_stream, 0)
-						write-host "Value: $x"
-						$message = [System.Text.Encoding]::ASCII.GetString($bytes[0..($return - 1)])
-
-					}
-					7 { #disconnect
-						[console]::writeline("Disconnect Received")
-						$server_state['active'] = $false
+						[console]::writeline("Received Disconnect:")
+						$message_size_bytes = New-Object byte[] 2
+						$count = $server_stream.Read($message_size_bytes, 0, 2)
+						$message_size = [BitConverter]::ToInt16($message_size_bytes, 0)
+						
+						$message_bytes = New-Object byte[] $message_size
+						$count = $server_stream.Read($message_bytes, 0, $message_size)
+						$message = [System.Text.Encoding]::ASCII.GetString($message_bytes)
+						[console]::writeline("$message")
 					}
 					default {
 						[console]::writeline("Unknown message type: $type")
@@ -220,8 +233,7 @@ function StartMessageReceiver ()
 						$type = New-Object byte[] 1
 						$count = $server_stream.Read($type, 0, 1) # Blocking
 						
-						
-						ProcessMessage $type
+						ProcessMessage $type[0]
 					#}
 					#catch [Exception]
 					#{
@@ -236,13 +248,13 @@ function StartMessageReceiver ()
 			else 
 			{
 				[console]::writeline("!!! Connection Closed.")
+				$server_state['active'] = $false
 				Break
 			}
 			
 		}
 		
 		[console]::writeline("!!!!!!!!!!!!!!!!!!!!!!!!!!! Message Receiver Finishing")
-		
 
 	}
 	
@@ -260,6 +272,65 @@ function StartMessageReceiver ()
 }
 	
 
+function StartMessageSender ()
+{
+	[console]::writeline("@@@@@@@@@@@@@@@@@@@@@@ Starting Message Sender")
+	$message_send_loop =
+	{
+		param (
+			[system.net.sockets.tcpclient] $client,
+			[system.net.sockets.NetworkStream] $server_stream
+		)
+		
+		function ProcessMessage($type)
+		{
+			switch($type)
+			{
+				0x01 {
+					$bytes = new-object byte[] 4
+					$position_bytes = 
+					$broadcast_stream.Write($bytes,0,$true_size)
+					
+				}
+				0x02 {
+					
+				}
+			}
+		
+		}
+		
+		while ($server_state['active'] -and $client.Connected)
+		{
+			if ($message_queue.count -gt 0)
+			{
+				while ($message_queue.count -gt 0)
+				{
+					ProcessMessage $message_queue.Dequeue()
+				}
+				$server_stream.Flush()
+			}
+		}
+		
+		$server_state['active'] = $false
+		[console]::writeline("!!! Connection Closed.")		
+		[console]::writeline("@@@@@@@@@@@@@@@@@@@@@@@@ Message Sender Finishing")
+	}
+	
+	$ps_message_sender = [PowerShell]::Create()
+	$ps_message_sender.RunspacePool = $rp
+	$ps_message_sender.AddScript($message_send_loop) | out-null
+	$ps_message_sender.AddParameters(@{client=$client; server_stream=$server_stream})
+	
+	$handle_message_sender = "" | select job, shell
+	$handle_message_sender.shell = $ps_message_sender
+	$handle_message_sender.job = $ps_message_sender.BeginInvoke()
+	
+	return $handle_message_sender
+
+}
+
+
+
 
 function Disconnect()
 {
@@ -270,8 +341,10 @@ function Disconnect()
 
 	$handle_message_receive.shell.EndInvoke($handle_message_receive.job)
 	$handle_message_receive.shell.Dispose()
+	$handle_message_sender.shell.EndInvoke($handle_message_sender.job)
+	$handle_message_sender.shell.Dispose()
+	
 	$rp.Close()
-
 }
 
 
@@ -283,6 +356,7 @@ $serverip = [system.net.IPAddress]::Parse($serverip)
 Connect $username $port $serverip
 
 $handle_message_receive = StartMessageReceiver
+$handle_message_sender = StartMessageSender
 
 
 
