@@ -37,6 +37,18 @@ using System;
 			this.x = x;
 			this.y = y;	
 		}
+		public void set (byte[] bytes)
+		{
+			this.x = BitConverter.ToInt16(bytes, 0);
+			this.y = BitConverter.ToInt16(bytes, 2);			
+		}
+		public byte[] bytes()
+		{
+			byte[] r = new byte[4];
+			BitConverter.GetBytes(this.x).CopyTo(r, 0);
+			BitConverter.GetBytes(this.y).CopyTo(r, 2);
+			return r;
+		}
 		public String toString()
 		{
 			return "(" + this.x + ", " + this.y + ")";
@@ -112,12 +124,6 @@ $listener_script =
 		)
 	
 	
-	
-	
-	
-	
-	
-	
 	function StartMessageReceiver ($user_id)
 	{
 		[console]::writeline("!!!!!!!!!!!!!!!!!!! Starting Message Receiver for $user_id")
@@ -132,38 +138,22 @@ $listener_script =
 			function ProcessMessage($type)
 			{
 				#while (!$server_stream.DataAvailable) {}
-				[console]::writeline("Test1")
 				#try
 				#{
 					switch($type)
 					{
-						0x01 { #update position
+						0x11 { #update position
 							[console]::writeline("Reading Position...")
 							$position_bytes = New-Object byte[] 4
 							$count = $stream.Read($position_bytes, 0, 4)
-							[console]::writeline("x bytes: {0}" -f $position_bytes[0..1])
-							[console]::writeline("y bytes: {0}" -f $position_bytes[2..3])
-							$x = [BitConverter]::ToInt16($position_bytes[0..1], 0)
-							[console]::writeline("x: $x")
-							$y = [BitConverter]::ToInt16($position_bytes, 2)
-							[console]::writeline("y: $y")
-							
-							$users[$user_id].SetPosition($x, $y)
+							$users[$user_id].position.set($position_bytes)
+							[console]::writeline("Received New Position: {0}" -f $users[$user_id].position.toString())
 						}
-						0x02 { #action
+						0x12 { #action1
 							[console]::writeline("Reading Action...")
-							$message_size_bytes = New-Object byte[] 2
-							$count = $stream.Read($message_size_bytes, 0, 2)
-							$message_size = [BitConverter]::ToInt16($message_size_bytes, 0)
-							[console]::writeline("Message Size: $message_size")
-							
-							$user_size = 5
-							$true_message_size = $message_size * $user_size
-							
-							$message_bytes = New-Object byte[] $true_message_size
-							$count = $stream.Read($message_bytes, 0, $true_message_size)
-							[console]::writeline("Message: ($message_bytes)")
-		
+							$message_bytes = New-Object byte[] 2
+							$count = $stream.Read($message_bytes, 0, 2)
+							[console]::writeline("Action 0x12: ($message_bytes)")
 						}
 						0xff { #disconnect
 							[console]::writeline("Received Disconnect:")
@@ -265,19 +255,31 @@ $listener_script =
 	{
 		$stream = $client.getstream()
 		$username = ""
-		[byte[]]$bytes = New-Object byte[] 3
+		
+		$username_length_bytes = New-Object byte[] 1
+		$count = $server_stream.Read($username_length_bytes, 0, 1)
+		$length = $username_length_bytes[0]
+		[console]::writeline("Username Length: $length")
+
+		[byte[]]$bytes = New-Object byte[] $length
 
 
-		$return = $stream.Read($bytes, 0, 3)
+		$count = $stream.Read($bytes, 0, $length)
 		$username = [text.Encoding]::Ascii.GetString($bytes)
 		
 		[console]::writeline("New User {0}" -f $username)
 		# Add client
+
+		[User] $user = new-object User -ArgumentList $username
+		[console]::writeline("User ID: {0}" -f $user.id)
+		$clients[$user.id] = $client
+		$users[$user.id] = $user
 		
 		#Send connection message to client
-		$stream.Write(@(0x00),0,1)
+		$stream.Write(@($user.id),0,1)
 		$stream.Flush()
-		return $username
+		
+		return $user
 	}
 	
 
@@ -305,9 +307,7 @@ $listener_script =
 			If ($client -ne $Null)
 			{
 				[console]::writeline("Connecting to Client.. .")
-				$username = CreateConnection $client
-				[User] $user = new-object User -ArgumentList $username
-				[console]::writeline("User ID: {0}" -f $user.id)
+				$user = CreateConnection $client
 				$clients[$user.id] = $client
 				$users[$user.id] = $user
 
@@ -408,6 +408,9 @@ function RemoveAllClients()
 }
 
 
+
+
+
 function BroadcastMessage ($message)
 {
 	CheckRemoveClients
@@ -415,7 +418,6 @@ function BroadcastMessage ($message)
 	
 	foreach ($user_id in $clients.keys)
 	{
-		$users[$user_id].Move(1, 1)
 		$client = $clients[$user_id]
 
 		if (-not $client.connected)
@@ -436,41 +438,22 @@ function BroadcastMessage ($message)
 			$byte_size = [BitConverter]::GetBytes($size)
 			$bytes = new-object byte[] $true_size
 			$bytes[0] = 0x01
-			$bytes[1] = $byte_size[0]
-			$bytes[2] = $byte_size[1]
+			[array]::copy($byte_size, 0, $bytes, 1, 2)
 			$i = 3
 			foreach ($uid in $users.keys)
 			{
 				#if ($uid -eq $user_id) { continue }
 				$bytes[$i++] = $uid
-				$x = [BitConverter]::GetBytes($users[$uid].position.x)
-				$y = [BitConverter]::GetBytes($users[$uid].position.x)
-				$bytes[$i++] = $x[0]
-				$bytes[$i++] = $x[1]
-				$bytes[$i++] = $y[0]
-				$bytes[$i++] = $y[1]
-
+				$position_bytes = $users[$uid].position.bytes()
+				[array]::copy($position_bytes, 0, $bytes, $i, 4)
+				$i += 4
+				
 			}
 			[console]::writeline("Message Bytes: $bytes")
 			$broadcast_stream.Write($bytes,0,$true_size)
 			$broadcast_stream.Flush()
 			[console]::writeline("--- Message Sent")
-			continue
-
-
-			[byte] $type = 0x01
-			[console]::writeline("Type: $type")
 			
-			$message_bytes = ([text.encoding]::ASCII).GetBytes($message)
-			[int16]$message_size = [int16]$message_bytes.Count
-			$message_size_bytes = [BitConverter]::GetBytes($message_size)
-			
-			[console]::writeline("Message_size: $message_size")
-			[console]::writeline("messgae_bytes: $message_bytes")
-			
-			$broadcast_stream.Write($type,0,1)
-			$broadcast_stream.Write($message_size_bytes,0,2)
-			$broadcast_stream.Write($message_bytes,0,$message_size)
 			
 		#} catch [Exception]{
 		#	[console]::writeline("Unable to write to {0}: `n{1}", $user, $_.Exception.Message)
@@ -489,7 +472,7 @@ while ($clients.count -eq 0) {}
 $i = 0
 while ($true)
 {
-	write-host "Keys: " + $clients.keys
+	write-host "Keys:" $clients.keys
 	foreach ($u in $clients.keys)
 	{
 		write-host $u
