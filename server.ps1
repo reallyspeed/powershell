@@ -137,7 +137,7 @@ $listener_script =
 			
 			function ProcessMessage($type)
 			{
-				#while (!$server_stream.DataAvailable) {}
+				#while (!$stream.DataAvailable) {}
 				#try
 				#{
 					switch($type)
@@ -168,11 +168,11 @@ $listener_script =
 							return $false
 						}
 						default {
-							[console]::writeline("Unknown message type: $type")
 							$byte_stream = New-Object byte[] $buff_size
 							$count = $stream.Read($byte_stream, 0, $buff_size)
-							#if count = 0
-							write-host "bytes: $byte_stream"
+							$a = [string]::Join(' ', $byte_stream[0..($count-1)])
+							[console]::writeline("Unknown message ({0}) `n[{1}]", $type, $a)
+							[console]::flush()
 							return $false
 							
 						}
@@ -201,7 +201,7 @@ $listener_script =
 						#{
 							[console]::writeline("!!! Data Available")
 							$type = New-Object byte[] 1
-							$count = $server_stream.Read($type, 0, 1) # Blocking
+							$count = $stream.Read($type, 0, 1) # Blocking
 							
 							$continue_reading = ProcessMessage $type[0]
 						#}
@@ -217,8 +217,8 @@ $listener_script =
 						}
 						
 						#### DEBUG ################################
-						$remove_client_queue.Enqueue($user_id)
-						break
+						#$remove_client_queue.Enqueue($user_id)
+						#break
 						
 					}
 				}
@@ -240,6 +240,7 @@ $listener_script =
 		$runspace_message_receive.SessionStateProxy.setVariable("remove_client_queue", $remove_client_queue)
 		$runspace_message_receive.SessionStateProxy.setVariable("client_message_queue", $client_message_queue)
 		$runspace_message_receive.SessionStateProxy.setVariable("server_state", $server_state)
+		$runspace_message_receive.SessionStateProxy.setVariable("users", $users)
 		$runspace_message_receive.SessionStateProxy.setVariable("user_id", $user_id)
 		$shell_message_receive = [PowerShell]::Create()
 		$shell_message_receive.Runspace = $runspace_message_receive
@@ -254,20 +255,18 @@ $listener_script =
 	function CreateConnection ($client)
 	{
 		$stream = $client.getstream()
-		$username = ""
+		[string]$username = $null
 		
 		$username_length_bytes = New-Object byte[] 1
-		$count = $server_stream.Read($username_length_bytes, 0, 1)
+		$count = $stream.Read($username_length_bytes, 0, 1)
 		$length = $username_length_bytes[0]
-		[console]::writeline("Username Length: $length")
 
-		[byte[]]$bytes = New-Object byte[] $length
+		[byte[]]$username_bytes = New-Object byte[] $length
 
 
-		$count = $stream.Read($bytes, 0, $length)
-		$username = [text.Encoding]::Ascii.GetString($bytes)
+		$count = $stream.Read($username_bytes, 0, $length)
+		$username = [text.Encoding]::Ascii.GetString($username_bytes)
 		
-		[console]::writeline("New User {0}" -f $username)
 		# Add client
 
 		[User] $user = new-object User -ArgumentList $username
@@ -278,6 +277,7 @@ $listener_script =
 		#Send connection message to client
 		$stream.Write(@($user.id),0,1)
 		$stream.Flush()
+		[console]::writeline("New User `n{0}" -f $user.toString())
 		
 		return $user
 	}
@@ -310,8 +310,7 @@ $listener_script =
 				$user = CreateConnection $client
 				$clients[$user.id] = $client
 				$users[$user.id] = $user
-
-				[console]::writeline("Created User: `n{0}" -f $user.toString())
+				
 				StartMessageReceiver $user.id
 			}
 			else
@@ -366,6 +365,9 @@ $handle_listener.job = $ps_listener.BeginInvoke()
 
 function RemoveClient($user_id)
 {
+	#DEBUG #########################################
+	start-sleep -s 2
+	
 	[console]::writeline("Removing client: $user_id")
 	$client_threads[$user_id].shell.EndInvoke($client_threads[$user_id].job)
     $client_threads[$user_id].shell.Runspace.Close()
@@ -418,6 +420,7 @@ function BroadcastMessage ($message)
 	
 	foreach ($user_id in $clients.keys)
 	{
+		$users[$user_id].Move(1, 1)
 		$client = $clients[$user_id]
 
 		if (-not $client.connected)
@@ -472,11 +475,8 @@ while ($clients.count -eq 0) {}
 $i = 0
 while ($true)
 {
-	write-host "Keys:" $clients.keys
-	foreach ($u in $clients.keys)
-	{
-		write-host $u
-	}
+	[console]::writeline("Client Count" -f $clients.count)
+	
 	start-sleep -s 1
 	BroadcastMessage "Message $i"
 	$i++
