@@ -134,8 +134,9 @@ function Connect ($username, $port, $server)
 	$server_stream = $client.GetStream()
 	$message = [text.Encoding]::Ascii.GetBytes($username)
 	[byte]$length = [math]::min($message.length, 3)
-	write-host $length
+	[console]::writeline("Username length: $length")
 	#$length_bytes = [BitConverter]::GetBytes($length)
+	#[console]::writeline("Username length bits: $length_bytes")
 
 	$server_stream.write(@($length), 0, 1)
 	$server_stream.write($message, 0, $length)
@@ -326,16 +327,13 @@ function ProcessSendMessage($type)
 
 function SendMessages()
 {
-	while ($server_state['active'] -and $client.Connected)
+	if ($message_queue.count -gt 0)
 	{
-		if ($message_queue.count -gt 0)
+		while ($message_queue.count -gt 0)
 		{
-			while ($message_queue.count -gt 0)
-			{
-				ProcessSendMessage $message_queue.Dequeue()
-			}
-			$server_stream.Flush()
+			ProcessSendMessage $message_queue.Dequeue()
 		}
+		$server_stream.Flush()
 	}
 }
 
@@ -368,11 +366,12 @@ $handle_message_receive = StartMessageReceiver
 
 
 
-while ($server_state['active'])
+while ($server_state['active'] -and $client.connected)
 {
 	start-sleep -s 1
 	$this_user.Move(1, 1)
 	$message_queue.Enqueue(0x11)
+	[console]::writeline("Queue Length: {0}", $message_queue.count)
 	SendMessages
 }
 
